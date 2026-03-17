@@ -144,6 +144,10 @@ jobs:
           echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
           echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
 
+          # 禁用 DEBUG_INFO_BTF，避免缺少 pahole 导致编译失败
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
+
       - name: 编译
         working-directory: kernel
         run: |
