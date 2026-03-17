@@ -23,7 +23,8 @@ jobs:
     steps:
       - name: 安装软件包
         env:
-          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+          # 添加 libelf-dev 解决 resolve_btfids 编译错误，同时补充常见依赖
+          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential
         run: |
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
