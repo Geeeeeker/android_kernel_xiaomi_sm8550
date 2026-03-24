@@ -191,11 +191,11 @@ jobs:
           echo "$DTB_FILES"
           
           # 根据设备名 fuxi 选择 dtb 文件
-          FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi|sm8250" | head -n1)
+          FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi|sm8550" | head -n1)
           if [ -z "$FUXI_DTB" ]; then
             # 如果没有匹配的，取第一个 dtb
             FUXI_DTB=$(echo "$DTB_FILES" | head -n1)
-            echo "警告：未找到包含 fuxi 或 sm8250 的 dtb 文件，使用第一个 dtb: $FUXI_DTB"
+            echo "警告：未找到包含 fuxi 或 sm8550 的 dtb 文件，使用第一个 dtb: $FUXI_DTB"
           else
             echo "找到匹配的设备树文件：$FUXI_DTB"
           fi
