@@ -80,10 +80,12 @@ jobs:
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
 
-      # ========== 复制设备树（增强版） ==========
-      - name: 复制设备树文件
+      # ========== 复制设备树并准备编译 ==========
+      - name: 复制设备树文件并准备 Makefile
         run: |
+          # 确保目标目录存在
           mkdir -p kernel/arch/arm64/boot/dts/qcom/
+          
           # 复制 common 设备树
           if [ -d "device/xiaomi/sm8550-common/dts" ]; then
             cp -rf device/xiaomi/sm8550-common/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
@@ -91,6 +93,7 @@ jobs:
           else
             echo "警告: device/xiaomi/sm8550-common/dts 不存在"
           fi
+          
           # 复制 fuxi 设备树
           if [ -d "device/xiaomi/fuxi/dts" ]; then
             cp -rf device/xiaomi/fuxi/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
@@ -98,12 +101,46 @@ jobs:
           else
             echo "警告: device/xiaomi/fuxi/dts 不存在"
           fi
-          # 列出复制后的设备树文件（调试）
-          echo "=== 内核树中的设备树文件列表 ==="
-          find kernel/arch/arm64/boot/dts/qcom/ -name "*.dts*" 2>/dev/null || echo "未找到 .dts 文件"
-          # 复制 Makefile（如果存在）
+          
+          # 复制设备树仓库中的 Makefile（如果存在）
           cp device/xiaomi/sm8550-common/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
           cp device/xiaomi/fuxi/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
+          
+          # 列出复制后的所有 .dts 和 .dtsi 文件
+          echo "=== 复制后的设备树源文件 ==="
+          find kernel/arch/arm64/boot/dts/qcom/ -name "*.dts*" | tee dts_files.txt
+          
+          # 检查是否有 .dts 文件
+          if [ ! -s dts_files.txt ]; then
+            echo "错误：未复制到任何 .dts 文件，请检查设备树仓库路径"
+            exit 1
+          fi
+          
+          # 进入内核设备树目录，修改 Makefile 以确保所有 .dts 文件都被编译
+          cd kernel/arch/arm64/boot/dts/qcom/
+          
+          # 如果 Makefile 存在，则将其备份
+          if [ -f Makefile ]; then
+            cp Makefile Makefile.bak
+          else
+            # 如果不存在 Makefile，创建一个新的
+            echo "# SPDX-License-Identifier: GPL-2.0" > Makefile
+            echo "dtb-y :=" >> Makefile
+          fi
+          
+          # 获取所有 .dts 文件的基础名（去掉 .dts 后缀），并添加到 dtb-y 中
+          for dts in $(find . -name "*.dts" -not -path "./Makefile" -printf "%P\n"); do
+            dtb=${dts%.dts}.dtb
+            # 检查是否已经在 dtb-y 中
+            if ! grep -q "$dtb" Makefile; then
+              echo "dtb-y += $dtb" >> Makefile
+              echo "添加 dtb 目标: $dtb"
+            fi
+          done
+          
+          # 显示最终的 Makefile 内容（调试）
+          echo "=== 最终 Makefile 内容 ==="
+          cat Makefile
 
       # ========== 集成 KernelSU ==========
       - name: 集成 KernelSU
@@ -215,7 +252,7 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 显式编译设备树（必须成功） ==========
+      # ========== 显式编译设备树 ==========
       - name: 编译设备树
         working-directory: kernel
         run: |
@@ -224,11 +261,17 @@ jobs:
           echo "=== 编译生成的设备树文件 ==="
           find out -name "*.dtb" | tee dtb_list.txt
           if [ ! -s dtb_list.txt ]; then
-            echo "错误：未生成任何 .dtb 文件，请检查设备树源文件"
+            echo "错误：未生成任何 .dtb 文件"
             exit 1
           fi
+          # 检查是否包含 fuxi 关键字
+          if grep -i fuxi dtb_list.txt; then
+            echo "找到 fuxi 设备树"
+          else
+            echo "警告：未找到包含 'fuxi' 的设备树文件，请检查设备树源文件命名"
+          fi
 
-      # ========== 使用 Docker 编译 USBIP 模块（复用主 out 目录） ==========
+      # ========== 使用 Docker 编译 USBIP 模块 ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
           cat > Dockerfile <<'EOF'
@@ -250,7 +293,7 @@ jobs:
           OUTPUT_DIR="$3"
 
           cd "$KERNEL_SRC"
-          # 准备编译环境（确保有 scripts/basic 等）
+          # 准备编译环境
           make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts_basic
           make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
           # 编译 USBIP 模块
@@ -276,14 +319,14 @@ jobs:
           cd modules_final
           zip -qr ../modules-${{ matrix.device }}.zip *
 
-      # ========== 准备内核镜像（使用已编译的 dtb） ==========
+      # ========== 准备内核镜像 ==========
       - name: 准备内核镜像
         working-directory: kernel
         run: |
           set -e
           DTB_FILES=$(find out -name "*.dtb")
           if [ -z "$DTB_FILES" ]; then
-            echo "错误：未找到任何 dtb 文件，请检查设备树编译步骤"
+            echo "错误：未找到任何 dtb 文件"
             exit 1
           fi
           # 优先使用包含 fuxi 或 sm8550 的 dtb
