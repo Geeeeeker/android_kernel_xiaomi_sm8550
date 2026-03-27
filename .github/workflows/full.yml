@@ -54,7 +54,7 @@ jobs:
       - name: 同步内核模块（高通/NXP 驱动）
         uses: actions/checkout@v4
         with:
-          repository: LineageOS/android_kernel_qcom_sm8550-modules
+          repository: LineageOS/android_kernel_xiaomi_sm8550-modules
           path: modules
           ref: lineage-23.2
 
@@ -203,8 +203,7 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/modules_built
           
           # 需要编译的外部模块列表（根据实际存在的 Makefile 判断）
-          # audio-kernel 有 Makefile，其他模块可能没有或已内置
-          # 您可以根据实际情况添加或删除
+          # 这些路径是基于 modules 仓库的常见结构
           MODULES_TO_COMPILE="
             modules/qcom/opensource/audio-kernel
             modules/qcom/opensource/camera-kernel
