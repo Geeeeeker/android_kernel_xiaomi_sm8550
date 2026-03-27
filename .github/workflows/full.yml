@@ -67,7 +67,6 @@ jobs:
       # ========== 整合设备树到内核源码树 ==========
       - name: 整合设备树文件
         run: |
-          # 确保目标目录存在
           mkdir -p kernel/arch/arm64/boot/dts/qcom/
           mkdir -p kernel/include/dt-bindings/
           
@@ -111,7 +110,7 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_VERSION }}
 
-      # ========== 配置内核参数 ==========
+      # ========== 配置内核参数（基础配置） ==========
       - name: 配置内核参数
         working-directory: kernel
         run: |
@@ -138,6 +137,66 @@ jobs:
           
           # 禁用 KASAN（解决 USBIP 编译错误）
           echo "# CONFIG_KASAN is not set" >> $DEFCONFIG
+
+      - name: 配置 LXC/Docker 支持
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
+          fi
+
+      - name: 修复配置（关闭虚拟化等）
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          sed -i '/CONFIG_KVM/d' $DEFCONFIG
+          sed -i '/CONFIG_VIRTUALIZATION/d' $DEFCONFIG
+          echo "# CONFIG_KVM is not set" >> $DEFCONFIG
+          echo "# CONFIG_VIRTUALIZATION is not set" >> $DEFCONFIG
+          sed -i '/CONFIG_VFIO/d' $DEFCONFIG
+          sed -i '/CONFIG_VFIO_PCI/d' $DEFCONFIG
+          echo "# CONFIG_VFIO is not set" >> $DEFCONFIG
+          echo "# CONFIG_VFIO_PCI is not set" >> $DEFCONFIG
+          echo "CONFIG_MMU_NOTIFIER=y" >> $DEFCONFIG
+          echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
+          echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
+
+      # ========== 最终确保禁用 BTF（避免 pahole 错误） ==========
+      - name: 禁用 BTF 和调试信息
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          # 彻底删除任何 CONFIG_DEBUG_INFO_BTF 行
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
+          sed -i '/CONFIG_DEBUG_INFO/d' $DEFCONFIG
+          # 显式禁用
+          echo "# CONFIG_DEBUG_INFO is not set" >> $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_REDUCED is not set" >> $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_COMPRESSED is not set" >> $DEFCONFIG
 
       # ========== 编译内核 ==========
       - name: 编译内核
@@ -168,7 +227,6 @@ jobs:
             echo "错误：未生成任何设备树文件"
             exit 1
           fi
-          # 检查是否包含 fuxi
           if grep -i fuxi dtb_list.txt; then
             echo "找到 fuxi 设备树文件"
           else
@@ -231,7 +289,6 @@ jobs:
           # 优先使用包含 fuxi 的 dtb
           FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi.*\.dtb$" | head -n1)
           if [ -z "$FUXI_DTB" ]; then
-            # 如果没有 fuxi 的 dtb，使用任何 dtb
             FUXI_DTB=$(echo "$DTB_FILES" | grep "\.dtb$" | head -n1)
             echo "使用默认 dtb: $FUXI_DTB"
           else
