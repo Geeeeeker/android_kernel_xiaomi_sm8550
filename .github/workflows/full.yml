@@ -51,7 +51,7 @@ jobs:
           path: device/xiaomi/fuxi
           ref: lineage-23.2
 
-      - name: 同步内核模块（高通全平台驱动）
+      - name: 同步内核模块（高通/NXP 驱动）
         uses: actions/checkout@v4
         with:
           repository: LineageOS/android_kernel_qcom_sm8550-modules
@@ -101,6 +101,7 @@ jobs:
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
           
+          # 基础配置
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
@@ -111,10 +112,20 @@ jobs:
           sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
+          
+          # KernelSU
           echo "CONFIG_KSU=y" >> $DEFCONFIG
+          
+          # USBIP 模块
           echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
+          
+          # 启用 Wi-Fi 驱动（假设内核源码中包含 qcacld-3.0）
+          echo "CONFIG_QCACLD_WLAN=m" >> $DEFCONFIG
+          echo "CONFIG_WLAN=y" >> $DEFCONFIG
+          echo "CONFIG_WLAN_VENDOR_QCOM=y" >> $DEFCONFIG
+          echo "CONFIG_CNSS2=m" >> $DEFCONFIG
 
       - name: 配置 LXC/Docker 支持
         working-directory: kernel
@@ -182,7 +193,7 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 编译所有外部模块（audio/bt/camera/wlan/display 等）==========
+      # ========== 编译外部模块（仅编译有 Makefile 的） ==========
       - name: 编译外部模块
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
@@ -191,9 +202,20 @@ jobs:
           
           mkdir -p $GITHUB_WORKSPACE/modules_built
           
-          # 编译 qcom/opensource 下的所有模块（包括 audio、bt、camera、wlan、display 等）
-          for MODULE_PATH in modules/qcom/opensource/*/; do
-            if [ -d "$MODULE_PATH" ] && [ -f "$MODULE_PATH/Kbuild" -o -f "$MODULE_PATH/Makefile" ]; then
+          # 需要编译的外部模块列表（根据实际存在的 Makefile 判断）
+          # audio-kernel 有 Makefile，其他模块可能没有或已内置
+          # 您可以根据实际情况添加或删除
+          MODULES_TO_COMPILE="
+            modules/qcom/opensource/audio-kernel
+            modules/qcom/opensource/camera-kernel
+            modules/qcom/opensource/display-drivers
+            modules/qcom/opensource/graphics-kernel
+            modules/qcom/opensource/video-driver
+            modules/nxp/opensource/driver
+          "
+          
+          for MODULE_PATH in $MODULES_TO_COMPILE; do
+            if [ -d "$MODULE_PATH" ] && [ -f "$MODULE_PATH/Makefile" -o -f "$MODULE_PATH/Kbuild" ]; then
               echo "编译模块: $MODULE_PATH"
               make -C $KERNEL_SRC \
                 O=$KERNEL_OUT \
@@ -205,25 +227,12 @@ jobs:
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                 M=$GITHUB_WORKSPACE/$MODULE_PATH \
                 modules
+            else
+              echo "跳过模块（无 Makefile）: $MODULE_PATH"
             fi
           done
           
-          # 编译 nxp 驱动
-          if [ -d "modules/nxp" ]; then
-            echo "编译 NXP 模块"
-            make -C $KERNEL_SRC \
-              O=$KERNEL_OUT \
-              ARCH=arm64 \
-              CC="ccache clang" \
-              LLVM=1 \
-              LLVM_IAS=1 \
-              CROSS_COMPILE=aarch64-linux-gnu- \
-              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-              M=$GITHUB_WORKSPACE/modules/nxp/opensource/driver \
-              modules
-          fi
-          
-          # 收集所有编译出的模块
+          # 收集编译出的模块
           find $KERNEL_OUT -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \;
 
       # ========== Docker 编译 USBIP 模块 ==========
@@ -272,12 +281,16 @@ jobs:
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # ========== 合并所有模块并打包 ==========
+      # ========== 合并所有模块 ==========
       - name: 合并所有模块
         run: |
           mkdir -p modules_final
           cp modules_built/*.ko modules_final/ 2>/dev/null || true
           cp modules_usbip/*.ko modules_final/ 2>/dev/null || true
+          
+          # 可选：复制内核编译生成的模块（如果有）
+          find kernel/out -name "*.ko" -not -path "*/drivers/usb/usbip/*" -exec cp {} modules_final/ \; 2>/dev/null || true
+          
           cd modules_final
           zip -qr ../modules-${{ matrix.device }}.zip *
 
