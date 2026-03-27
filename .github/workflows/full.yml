@@ -1,4 +1,4 @@
-name: 编译 fuxi 内核 (SM8550) - 核心版（仅内核 + KernelSU + USBIP）
+name: 编译 fuxi 内核 (SM8550) - 核心版（仅内核 + KernelSU + USBIP） (只编译Image.gz-dtb不含dtbo.img)
 
 on:
   push:
