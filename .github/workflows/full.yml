@@ -1,4 +1,4 @@
-name: 编译 fuxi 内核 (SM8550) - 完整版（含设备树、USBIP Docker）
+name: 编译 fuxi 内核 (SM8550) - 最终版
 
 on:
   push:
@@ -23,13 +23,11 @@ jobs:
           - fuxi
     steps:
       - name: 安装软件包
-        env:
-          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential device-tree-compiler
         run: |
-          sudo apt update > /dev/null
-          sudo apt install -y ${{ env.PACKAGES }} > /dev/null
+          sudo apt update
+          sudo apt install -y ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential device-tree-compiler
 
-      # ========== 同步四个仓库 ==========
+      # ========== 同步四个仓库（设备树仓库仅用于可能的配置，不复制 dts） ==========
       - name: 同步内核源码
         uses: actions/checkout@v4
         with:
@@ -80,67 +78,22 @@ jobs:
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
 
-      # ========== 复制设备树并准备编译 ==========
-      - name: 复制设备树文件并准备 Makefile
+      # ========== 确保内核源码中的设备树被编译 ==========
+      - name: 列出内核源码中的设备树源文件
+        working-directory: kernel
         run: |
-          # 确保目标目录存在
-          mkdir -p kernel/arch/arm64/boot/dts/qcom/
-          
-          # 复制 common 设备树
-          if [ -d "device/xiaomi/sm8550-common/dts" ]; then
-            cp -rf device/xiaomi/sm8550-common/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-            echo "已复制 common 设备树"
+          echo "=== 内核源码树中的设备树源文件 ==="
+          find arch/arm64/boot/dts/qcom -name "*.dts*" | tee dts_sources.txt
+          if [ ! -s dts_sources.txt ]; then
+            echo "警告：未找到任何设备树源文件，请检查内核源码树"
           else
-            echo "警告: device/xiaomi/sm8550-common/dts 不存在"
-          fi
-          
-          # 复制 fuxi 设备树
-          if [ -d "device/xiaomi/fuxi/dts" ]; then
-            cp -rf device/xiaomi/fuxi/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-            echo "已复制 fuxi 设备树"
-          else
-            echo "警告: device/xiaomi/fuxi/dts 不存在"
-          fi
-          
-          # 复制设备树仓库中的 Makefile（如果存在）
-          cp device/xiaomi/sm8550-common/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-          cp device/xiaomi/fuxi/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-          
-          # 列出复制后的所有 .dts 和 .dtsi 文件
-          echo "=== 复制后的设备树源文件 ==="
-          find kernel/arch/arm64/boot/dts/qcom/ -name "*.dts*" | tee dts_files.txt
-          
-          # 检查是否有 .dts 文件
-          if [ ! -s dts_files.txt ]; then
-            echo "错误：未复制到任何 .dts 文件，请检查设备树仓库路径"
-            exit 1
-          fi
-          
-          # 进入内核设备树目录，修改 Makefile 以确保所有 .dts 文件都被编译
-          cd kernel/arch/arm64/boot/dts/qcom/
-          
-          # 如果 Makefile 存在，则将其备份
-          if [ -f Makefile ]; then
-            cp Makefile Makefile.bak
-          else
-            # 如果不存在 Makefile，创建一个新的
-            echo "# SPDX-License-Identifier: GPL-2.0" > Makefile
-            echo "dtb-y :=" >> Makefile
-          fi
-          
-          # 获取所有 .dts 文件的基础名（去掉 .dts 后缀），并添加到 dtb-y 中
-          for dts in $(find . -name "*.dts" -not -path "./Makefile" -printf "%P\n"); do
-            dtb=${dts%.dts}.dtb
-            # 检查是否已经在 dtb-y 中
-            if ! grep -q "$dtb" Makefile; then
-              echo "dtb-y += $dtb" >> Makefile
-              echo "添加 dtb 目标: $dtb"
+            # 检查是否包含 fuxi
+            if grep -i fuxi dts_sources.txt; then
+              echo "找到 fuxi 设备树源文件"
+            else
+              echo "警告：未找到包含 'fuxi' 的设备树源文件"
             fi
-          done
-          
-          # 显示最终的 Makefile 内容（调试）
-          echo "=== 最终 Makefile 内容 ==="
-          cat Makefile
+          fi
 
       # ========== 集成 KernelSU ==========
       - name: 集成 KernelSU
@@ -148,7 +101,7 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_VERSION }}
 
-      # ========== 配置内核参数（禁用 KASAN，启用设备树编译） ==========
+      # ========== 配置内核参数 ==========
       - name: 配置内核参数
         working-directory: kernel
         run: |
@@ -157,12 +110,9 @@ jobs:
           # 基础配置
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
-          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
-          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
           echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
           sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
           sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
-          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
           echo "CONFIG_KSU=y" >> $DEFCONFIG
@@ -172,67 +122,12 @@ jobs:
           
           # 设备树相关配置
           echo "CONFIG_OF=y" >> $DEFCONFIG
-          echo "CONFIG_OF_ADDRESS=y" >> $DEFCONFIG
-          echo "CONFIG_OF_IRQ=y" >> $DEFCONFIG
-          echo "CONFIG_OF_RESERVED_MEM=y" >> $DEFCONFIG
-          echo "CONFIG_OF_DYNAMIC=y" >> $DEFCONFIG
           echo "CONFIG_OF_OVERLAY=y" >> $DEFCONFIG
           echo "CONFIG_ARCH_QCOM=y" >> $DEFCONFIG
           echo "CONFIG_BUILD_ARM64_DT_OVERLAY=y" >> $DEFCONFIG
           
           # 禁用 KASAN（解决 USBIP 编译错误）
           echo "# CONFIG_KASAN is not set" >> $DEFCONFIG
-          echo "# CONFIG_KASAN_GENERIC is not set" >> $DEFCONFIG
-          echo "# CONFIG_KASAN_OUTLINE is not set" >> $DEFCONFIG
-          echo "# CONFIG_KASAN_INLINE is not set" >> $DEFCONFIG
-
-      - name: 配置 LXC/Docker 支持
-        working-directory: kernel
-        run: |
-          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
-          rm -rf utils
-          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
-          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
-          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
-          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
-          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
-          echo 'source "utils/Kconfig"' >> "Kconfig"
-          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
-          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
-          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
-          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
-          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
-          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
-          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-          chmod +x utils/runcpatch.sh
-          if [ -f kernel/cgroup/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
-          fi
-          if [ -f kernel/cgroup.c ]; then
-              sh utils/runcpatch.sh kernel/cgroup.c
-          fi
-          if [ -f net/netfilter/xt_qtaguid.c ]; then
-              patch -p0 < utils/xt_qtaguid.patch
-          fi
-
-      - name: 修复配置（关闭虚拟化等）
-        working-directory: kernel
-        run: |
-          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
-          sed -i '/CONFIG_KVM/d' $DEFCONFIG
-          sed -i '/CONFIG_VIRTUALIZATION/d' $DEFCONFIG
-          echo "# CONFIG_KVM is not set" >> $DEFCONFIG
-          echo "# CONFIG_VIRTUALIZATION is not set" >> $DEFCONFIG
-          sed -i '/CONFIG_VFIO/d' $DEFCONFIG
-          sed -i '/CONFIG_VFIO_PCI/d' $DEFCONFIG
-          echo "# CONFIG_VFIO is not set" >> $DEFCONFIG
-          echo "# CONFIG_VFIO_PCI is not set" >> $DEFCONFIG
-          echo "CONFIG_MMU_NOTIFIER=y" >> $DEFCONFIG
-          echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
-          echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
-          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
-          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
 
       # ========== 编译内核 ==========
       - name: 编译内核
@@ -241,8 +136,7 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           export KBUILD_BUILD_USER=${{ github.repository_owner }}
           export KBUILD_BUILD_HOST=github-runner
-          export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
-          make -j$(nproc --all) \
+          make -j$(nproc) \
             CC="ccache clang" \
             ARCH=arm64 \
             LLVM=1 \
@@ -252,11 +146,25 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 显式编译设备树 ==========
+      # ========== 编译设备树 ==========
       - name: 编译设备树
         working-directory: kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          # 确保所有 .dts 文件都被添加到 dtb-y
+          cd arch/arm64/boot/dts/qcom
+          if [ -f Makefile ]; then
+            # 备份原 Makefile
+            cp Makefile Makefile.bak
+            # 添加所有 .dts 文件到 dtb-y
+            for dts in $(find . -name "*.dts" -not -path "./Makefile" -printf "%P\n"); do
+              dtb=${dts%.dts}.dtb
+              if ! grep -q "$dtb" Makefile; then
+                echo "dtb-y += $dtb" >> Makefile
+              fi
+            done
+          fi
+          cd -
           make -j$(nproc) O=out ARCH=arm64 dtbs
           echo "=== 编译生成的设备树文件 ==="
           find out -name "*.dtb" | tee dtb_list.txt
@@ -264,14 +172,8 @@ jobs:
             echo "错误：未生成任何 .dtb 文件"
             exit 1
           fi
-          # 检查是否包含 fuxi 关键字
-          if grep -i fuxi dtb_list.txt; then
-            echo "找到 fuxi 设备树"
-          else
-            echo "警告：未找到包含 'fuxi' 的设备树文件，请检查设备树源文件命名"
-          fi
 
-      # ========== 使用 Docker 编译 USBIP 模块 ==========
+      # ========== Docker 编译 USBIP 模块 ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
           cat > Dockerfile <<'EOF'
@@ -293,10 +195,8 @@ jobs:
           OUTPUT_DIR="$3"
 
           cd "$KERNEL_SRC"
-          # 准备编译环境
           make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts_basic
           make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
-          # 编译 USBIP 模块
           make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=drivers/usb/usbip modules
 
           mkdir -p "$OUTPUT_DIR"
@@ -311,19 +211,16 @@ jobs:
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /build/kernel_out /out
 
-      # ========== 打包 USBIP 模块 ==========
       - name: 打包 USBIP 模块
         run: |
           mkdir -p modules_final
           cp modules_usbip/*.ko modules_final/ 2>/dev/null || true
-          cd modules_final
-          zip -qr ../modules-${{ matrix.device }}.zip *
+          cd modules_final && zip -qr ../modules-${{ matrix.device }}.zip *
 
       # ========== 准备内核镜像 ==========
       - name: 准备内核镜像
         working-directory: kernel
         run: |
-          set -e
           DTB_FILES=$(find out -name "*.dtb")
           if [ -z "$DTB_FILES" ]; then
             echo "错误：未找到任何 dtb 文件"
@@ -332,20 +229,16 @@ jobs:
           # 优先使用包含 fuxi 或 sm8550 的 dtb
           FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi|sm8550" | head -n1)
           if [ -z "$FUXI_DTB" ]; then
-            echo "警告：未找到包含 fuxi 或 sm8550 的 dtb 文件，将使用第一个 dtb: $(echo "$DTB_FILES" | head -n1)"
             FUXI_DTB=$(echo "$DTB_FILES" | head -n1)
+            echo "使用默认 dtb: $FUXI_DTB"
           else
             echo "使用 dtb: $FUXI_DTB"
           fi
-          # 生成 Image.gz-dtb
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
-            cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
-            echo "已生成 Image.gz-dtb"
-          fi
+          gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
+          cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
 
-      # ========== 打包 AnyKernel3 ==========
-      - name: 打包(AnyKernel3)
+      # ========== 打包 ==========
+      - name: 打包 AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
           cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
@@ -364,9 +257,9 @@ jobs:
           split_boot
           flash_boot
           EOF
-          zip -qr9 ${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-Anykernel3.zip * -x .git .github README.md *placeholder
+          zip -qr9 ${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-Anykernel3.zip *
 
-      - name: 打包(boot)
+      - name: 打包 boot.img
         run: |
           git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1 mkbootimg
           cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
@@ -390,13 +283,13 @@ jobs:
           name: kernel-${{ matrix.device }}-boot
           path: mkbootimg/${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-boot-lineage.img
 
-      - name: 上传 USBIP 模块 zip
+      - name: 上传 USBIP 模块
         uses: actions/upload-artifact@v5
         with:
           name: kernel-${{ matrix.device }}-usbip
           path: modules-${{ matrix.device }}.zip
 
-      - name: 上传设备树列表（调试用）
+      - name: 上传设备树列表
         uses: actions/upload-artifact@v5
         with:
           name: dtb-list
@@ -415,7 +308,7 @@ jobs:
           pattern: kernel-*
           merge-multiple: true
 
-      - name: 获取当前时间
+      - name: 获取时间
         id: time
         run: |
           echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
