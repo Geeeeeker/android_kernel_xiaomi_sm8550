@@ -1,135 +1,250 @@
-name: Build Kernel for Xiaomi fuxi (SM8550)
+name: 编译 fuxi 内核 (SM8550)
 
 on:
+  push:
+    branches:
+      - dev/*
+      - stable/*
   workflow_dispatch:
-  # push:
-  #   branches: [ main, lineage-23.2 ]
 
 env:
-  KERNEL_DIR: kernel/xiaomi/sm8550
-  DEVICE_COMMON_DIR: device/xiaomi/sm8550-common
-  DEVICE_FUXI_DIR: device/xiaomi/fuxi
-  MODULES_DIR: vendor/xiaomi/sm8550-modules
-  OUT_DIR: out/kernel
-  RELEASE_DIR: releases
-  ARCH: arm64
+  AOSP_TOOLCHAIN_BRANCH: android16
+  AOSP_CLANG_VERSION: r547379
+  # KernelSU 版本
   KERNELSU_VERSION: main
-  # NDK 版本
-  NDK_VERSION: r26c
 
 jobs:
   build:
+    name: 编译内核
+    permissions: { contents: write }
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        device:
+          - fuxi
     steps:
-      # 1. 安装系统依赖（不安装 docker.io）
-      - name: Install build dependencies
+      - name: 安装软件包
+        env:
+          # 添加 libelf-dev 解决 resolve_btfids 编译错误，同时补充常见依赖
+          PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential device-tree-compiler
         run: |
-          sudo apt update
-          sudo apt install -y \
-            bc bison build-essential ccache \
-            flex libssl-dev libelf-dev \
-            git git-lfs wget curl cpio \
-            python3 python3-pip \
-            lz4 lzop xz-utils device-tree-compiler
-          pip3 install PyYAML
+          sudo apt update > /dev/null
+          sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
-      # 2. 设置 ccache 加速
-      - name: Setup ccache
-        run: |
-          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
-          mkdir -p .ccache
-          echo "CCACHE_MAXSIZE=2G" >> $GITHUB_ENV
-
-      # 3. 检出内核源码
-      - name: Checkout kernel source
+      # ========== 同步所有仓库 ==========
+      - name: 同步内核源码
         uses: actions/checkout@v4
         with:
           repository: Geeeeeker/android_kernel_xiaomi_sm8550
-          path: ${{ env.KERNEL_DIR }}
-          fetch-depth: 1
+          path: kernel
+          ref: lineage-23.2
 
-      # 4. 检出设备树仓库
-      - name: Checkout device trees
+      - name: 同步设备树 common
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_device_xiaomi_sm8550-common
+          path: device/xiaomi/sm8550-common
+          ref: lineage-23.2
+
+      - name: 同步设备树 fuxi
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_device_xiaomi_fuxi
+          path: device/xiaomi/fuxi
+          ref: lineage-23.2
+
+      - name: 同步内核模块（闭源模块）
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_xiaomi_sm8550-modules
+          path: vendor/xiaomi/sm8550-modules
+          ref: lineage-23.2
+
+      # ========== 工具链缓存 ==========
+      - name: 缓存Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.AOSP_TOOLCHAIN_BRANCH }}-${{ env.AOSP_CLANG_VERSION }}
+
+      - name: 下载Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_device_xiaomi_sm8550-common ${{ env.DEVICE_COMMON_DIR }}
-          git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_device_xiaomi_fuxi ${{ env.DEVICE_FUXI_DIR }}
+          mkdir -p clang &&
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.AOSP_TOOLCHAIN_BRANCH }}-release/clang-${{ env.AOSP_CLANG_VERSION }}.tar.gz" |
+          tar xz -C clang
 
-      # 5. 检出内核模块仓库
-      - name: Checkout kernel modules
+      - name: 缓存ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-${{ matrix.device }}
+          restore-keys: kernel-${{ matrix.device }}
+          max-size: 5G
+
+      # ========== 复制设备树文件到内核树 ==========
+      - name: 复制设备树文件
         run: |
-          git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_kernel_xiaomi_sm8550-modules ${{ env.MODULES_DIR }}
+          # 确保目标目录存在
+          mkdir -p kernel/arch/arm64/boot/dts/qcom/
+          # 复制 common 设备树（可能包含头文件，需保留结构）
+          cp -r device/xiaomi/sm8550-common/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
+          # 复制 fuxi 设备树
+          cp -r device/xiaomi/fuxi/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
+          # 如果存在 Makefile 或 Kbuild，也一并复制
+          cp device/xiaomi/sm8550-common/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
+          cp device/xiaomi/fuxi/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
 
-      # 6. 下载并设置 Android NDK 工具链
-      - name: Setup NDK toolchain
-        run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
-          unzip -q android-ndk-${NDK_VERSION}-linux.zip -d /tmp/
-          echo "PATH=/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
-
-      # 7. 集成 KernelSU
-      - name: Integrate KernelSU
-        working-directory: ${{ env.KERNEL_DIR }}
+      # ========== 集成 KernelSU ==========
+      - name: 集成 KernelSU
+        working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_VERSION }}
-          # 可选：添加 susfs 扩展
+          # 可选：添加 susfs 扩展（如需增强隐藏功能）
           # curl -LSs "https://raw.githubusercontent.com/simonpunk/susfs4ksu/main/setup.sh" | bash -s v1.5.5
 
-      # 8. 修改 defconfig（启用 KernelSU 和 USBIP）
-      - name: Configure defconfig
-        working-directory: ${{ env.KERNEL_DIR }}
+      # ========== 配置内核参数（基础 + KernelSU + USBIP）==========
+      - name: 配置内核基础参数 (Kprobes/OverlayFS/LTO等)
+        working-directory: kernel
         run: |
-          # 备份原配置
-          cp arch/arm64/configs/fuxi_GKI_defconfig arch/arm64/configs/fuxi_GKI_defconfig.bak
-          # 追加配置
-          cat >> arch/arm64/configs/fuxi_GKI_defconfig <<EOF
-          CONFIG_KSU=y
-          CONFIG_USBIP_CORE=m
-          CONFIG_USBIP_VHCI_HCD=m
-          CONFIG_USBIP_HOST=m
-          # CONFIG_USBIP_DEBUG=y
-          EOF
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          
+          # 开启 Kprobes
+          echo "CONFIG_MODULES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
+          
+          # 开启 OverlayFS
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          
+          # 禁用 LTO
+          sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
+          sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
+          sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          
+          # 禁用 CC_WERROR
+          echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
 
-      # 9. 编译主内核和模块（不包含 USBIP）
-      - name: Build kernel and modules
-        working-directory: ${{ env.KERNEL_DIR }}
+          # 添加 KernelSU 配置（如果脚本未自动添加）
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          # 可选：启用 SUSFS
+          # echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+
+          # 添加 USBIP 支持（作为模块）
+          echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
+          echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
+          echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
+          # 可选：调试
+          # echo "CONFIG_USBIP_DEBUG=y" >> $DEFCONFIG
+
+      # 保留原有的 LXC/Docker 支持配置
+      - name: 配置 LXC 和 Docker 支持
+        working-directory: kernel
         run: |
-          export PATH=$PATH
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export AS=llvm-as
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export READELF=llvm-readelf
-          export CROSS_COMPILE=aarch64-linux-android-
-          export ARCH=${{ env.ARCH }}
-          export CCACHE_DIR=${{ github.workspace }}/.ccache
-          export CCACHE_MAXSIZE=2G
-          export CC="ccache clang"
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
 
-          make ${{ env.ARCH }} fuxi_GKI_defconfig
-          # 可选：合并设备树中的额外配置
-          # cat ../../${{ env.DEVICE_FUXI_DIR }}/extra_defconfig >> .config
+          # 移除 LXC 补丁中强制选中的越权语句
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          
+          # 在 defconfig 显式禁用会引发代码冲突的调度器特性
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
 
-          # 编译内核镜像
-          make -j$(nproc) Image.gz dtbo.img
+          # 禁用偏执网络
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          
+          # 显式禁用发生冲突的 Block 特性
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
 
-          # 编译所有模块（排除 USBIP，后面单独处理）
-          make -j$(nproc) modules
+          # 统一在此处应用 runc 补丁和 qtaguid 补丁
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
+          fi
 
-          # 创建输出目录
-          mkdir -p ../../${{ env.OUT_DIR }}/modules
+      # ===== 修复配置：关闭虚拟化，启用必要功能 =====
+      - name: 修复配置（关闭KVM/VFIO，启用MMU_NOTIFIER和Android Vendor Hooks）
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          
+          # 彻底禁用 KVM 和 VIRTUALIZATION
+          sed -i '/CONFIG_KVM/d' $DEFCONFIG
+          sed -i '/CONFIG_VIRTUALIZATION/d' $DEFCONFIG
+          echo "# CONFIG_KVM is not set" >> $DEFCONFIG
+          echo "# CONFIG_VIRTUALIZATION is not set" >> $DEFCONFIG
+          
+          # 彻底禁用 VFIO 及其相关选项
+          sed -i '/CONFIG_VFIO/d' $DEFCONFIG
+          sed -i '/CONFIG_VFIO_PCI/d' $DEFCONFIG
+          echo "# CONFIG_VFIO is not set" >> $DEFCONFIG
+          echo "# CONFIG_VFIO_PCI is not set" >> $DEFCONFIG
+          
+          # 启用 MMU_NOTIFIER
+          echo "CONFIG_MMU_NOTIFIER=y" >> $DEFCONFIG
 
-          # 复制内核镜像
-          cp arch/arm64/boot/Image.gz ../../${{ env.OUT_DIR }}/
-          cp arch/arm64/boot/dtbo.img ../../${{ env.OUT_DIR }}/
+          # 启用 Android Vendor Hooks 解决未定义符号
+          echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
+          echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
 
-          # 复制普通模块（排除 USBIP）
-          find . -name "*.ko" -not -path "./drivers/usb/usbip/*" -exec cp {} ../../${{ env.OUT_DIR }}/modules/ \;
+          # 禁用 DEBUG_INFO_BTF，避免缺少 pahole 导致编译失败
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
 
-      # 10. 使用 Docker 编译 USBIP 模块（参考 full 方式）
-      - name: Build USBIP modules with Docker
+      # ========== 编译内核 ==========
+      - name: 编译内核
+        working-directory: kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export KBUILD_BUILD_USER=${{ github.repository_owner }}
+          export KBUILD_BUILD_HOST=github-runner
+          export KBUILD_BUILD_TIMESTAMP=$(date -u -d "@$(git log -1 --format=%at)" +"%a %b %d %H:%M:%S %Z %Y")
+          make -j$(nproc --all) \
+            CC="ccache clang" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            O=out \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            fuxi_GKI_defconfig all
+
+      # ========== 编译闭源模块（vendor modules）==========
+      - name: 编译 vendor 模块
+        working-directory: vendor/xiaomi/sm8550-modules
+        run: |
+          # 使用内核编译的输出头文件编译模块
+          export KERNEL_SRC=$GITHUB_WORKSPACE/kernel
+          export KERNEL_OUT=$KERNEL_SRC/out
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          # 假设模块有自己的 Makefile，通过内核构建系统编译
+          make -C $KERNEL_SRC M=$(pwd) O=$KERNEL_OUT ARCH=arm64 \
+            CC="ccache clang" LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            modules
+
+      # ========== 使用 Docker 编译 USBIP 模块（独立编译）==========
+      - name: 使用 Docker 编译 USBIP 模块
         run: |
           # 准备 Dockerfile，包含交叉编译工具链
           cat > Dockerfile <<'EOF'
@@ -156,7 +271,7 @@ jobs:
           make mrproper
           # 使用修改后的 defconfig（已包含 USBIP 模块配置）
           cp arch/arm64/configs/fuxi_GKI_defconfig .config
-          # 确保 USBIP 相关配置正确（以防 defconfig 未完全包含）
+          # 确保 USBIP 相关配置正确
           scripts/config --enable CONFIG_USBIP_CORE
           scripts/config --enable CONFIG_USBIP_VHCI_HCD
           scripts/config --enable CONFIG_USBIP_HOST
@@ -180,29 +295,158 @@ jobs:
 
           # 运行容器，挂载内核源码和输出目录
           docker run --rm \
-            -v ${{ github.workspace }}/${{ env.KERNEL_DIR }}:/build/kernel \
-            -v ${{ github.workspace }}/${{ env.OUT_DIR }}/usbip:/out \
-            -v ${{ github.workspace }}/build_usbip.sh:/build_usbip.sh \
+            -v $GITHUB_WORKSPACE/kernel:/build/kernel \
+            -v $GITHUB_WORKSPACE/modules_usbip:/out \
+            -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # 11. 合并 USBIP 模块到主模块目录
-      - name: Merge USBIP modules
+      # ========== 准备内核镜像（生成 Image.gz-dtb）==========
+      - name: 准备内核镜像 (生成 Image.gz-dtb)
+        working-directory: kernel
         run: |
-          cp ${{ env.OUT_DIR }}/usbip/*.ko ${{ env.OUT_DIR }}/modules/ || true
+          set -e
+          echo "检查编译输出目录："
+          ls -la out/arch/arm64/boot/
+          ls -la out/arch/arm64/boot/dts/ || echo "没有 dts 目录"
+          
+          # 首先尝试查找已存在的 dtb 文件
+          DTB_FILES=$(find out -name "*.dtb" 2>/dev/null || true)
+          if [ -z "$DTB_FILES" ]; then
+            echo "未找到任何 dtb 文件，尝试编译设备树..."
+            make -j$(nproc) O=out ARCH=arm64 dtbs
+            DTB_FILES=$(find out -name "*.dtb" 2>/dev/null || true)
+          fi
+          
+          if [ -z "$DTB_FILES" ]; then
+            echo "错误：仍然找不到任何设备树文件 (.dtb)"
+            exit 1
+          fi
+          
+          echo "找到以下 dtb 文件："
+          echo "$DTB_FILES"
+          
+          # 根据设备名 fuxi 选择 dtb 文件
+          FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi|sm8550" | head -n1)
+          if [ -z "$FUXI_DTB" ]; then
+            # 如果没有匹配的，取第一个 dtb
+            FUXI_DTB=$(echo "$DTB_FILES" | head -n1)
+            echo "警告：未找到包含 fuxi 或 sm8550 的 dtb 文件，使用第一个 dtb: $FUXI_DTB"
+          else
+            echo "找到匹配的设备树文件：$FUXI_DTB"
+          fi
+          
+          # 如果 Image.gz-dtb 不存在，手动创建
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "生成 Image.gz-dtb..."
+            # 压缩 Image 为 Image.gz
+            gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
+            # 合并
+            cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
+            echo "已生成 out/arch/arm64/boot/Image.gz-dtb"
+          else
+            echo "Image.gz-dtb 已存在"
+          fi
+          ls -la out/arch/arm64/boot/Image.gz-dtb
 
-      # 12. 打包最终产物
-      - name: Package artifacts
+      # ========== 打包模块 ==========
+      - name: 收集所有内核模块
         run: |
-          mkdir -p ${{ env.RELEASE_DIR }}
-          tar -czf ${{ env.RELEASE_DIR }}/kernel-fuxi-$(date +%Y%m%d-%H%M%S).tar.gz -C ${{ env.OUT_DIR }} .
-          echo "Build date: $(date)" > ${{ env.RELEASE_DIR }}/build_info.txt
-          echo "KernelSU version: ${{ env.KERNELSU_VERSION }}" >> ${{ env.RELEASE_DIR }}/build_info.txt
-          echo "Kernel commit: $(cd ${{ env.KERNEL_DIR }} && git rev-parse --short HEAD)" >> ${{ env.RELEASE_DIR }}/build_info.txt
+          mkdir -p modules_all
+          # 复制内核编译出的模块（排除 USBIP，已单独编译）
+          find kernel/out -name "*.ko" -not -path "*/drivers/usb/usbip/*" -exec cp {} modules_all/ \;
+          # 复制 vendor 模块
+          find vendor/xiaomi/sm8550-modules -name "*.ko" -exec cp {} modules_all/ \;
+          # 复制 Docker 编译的 USBIP 模块
+          cp modules_usbip/*.ko modules_all/ 2>/dev/null || true
+          # 打包模块 zip
+          cd modules_all
+          zip -qr ../modules-${{ matrix.device }}.zip *
 
-      # 13. 上传工件
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: 打包(AnyKernel3)
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb ak3/
+          cd ak3
+          cat >anykernel.sh <<EOF
+          properties() { '
+          kernel.string=Kernel for ${{ matrix.device }}
+          device.name1=${{ matrix.device }}
+          do.devicecheck=1
+          '; }
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          is_slot_device=auto
+          block=auto
+          . tools/ak3-core.sh
+          split_boot
+          flash_boot
+          EOF
+          zip -qr9 ${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-Anykernel3.zip * -x .git .github README.md *placeholder
+
+      - name: 打包(boot)
+        run: |
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg --depth=1 mkbootimg
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb mkbootimg/
+          cd mkbootimg
+          boot_url=$(curl -LSs https://download.lineageos.org/api/v2/devices/${{ matrix.device }}/builds | jq -r '.[0].files[1].url')
+          curl -LSs $boot_url -o boot.img
+          mkbootimg_args=$(./unpack_bootimg.py --out out --boot_img boot.img --format mkbootimg)
+          mv Image.gz-dtb out/kernel
+          eval "./mkbootimg.py $mkbootimg_args -o ${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-boot-lineage.img"
+
+      - name: 上传 AnyKernel3 包
+        uses: actions/upload-artifact@v5
         with:
-          name: kernel-fuxi
-          path: ${{ env.RELEASE_DIR }}/
-          retention-days: 7
+          name: kernel-${{ matrix.device }}-ak3
+          path: ak3/${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-Anykernel3.zip
+
+      - name: 上传 boot.img
+        uses: actions/upload-artifact@v5
+        with:
+          name: kernel-${{ matrix.device }}-boot
+          path: mkbootimg/${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-boot-lineage.img
+
+      - name: 上传模块 zip
+        uses: actions/upload-artifact@v5
+        with:
+          name: kernel-${{ matrix.device }}-modules
+          path: modules-${{ matrix.device }}.zip
+
+  release:
+    name: 发布
+    permissions: { contents: write }
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: 获取构建产物
+        uses: actions/download-artifact@v6
+        with:
+          path: kernel
+          pattern: kernel-*
+          merge-multiple: true
+
+      - name: 获取当前时间
+        id: time
+        run: |
+          echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: 下载ci管理器
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v11
+        with:
+          repo: rsuntk/KernelSU
+          workflow_conclusion: success
+          name: manager
+          workflow: build-manager.yml
+          path: manager
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rel-${{ steps.time.outputs.timestamp }}
+          name: Kernel build ${{ steps.time.outputs.time }}
+          prerelease: ${{ startsWith(github.ref_name, 'dev/') }}
+          files: |
+            kernel/*
+            manager/*
