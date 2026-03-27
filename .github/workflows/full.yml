@@ -1,4 +1,4 @@
-name: 编译 fuxi 内核 (SM8550) - 最终版（含 overlay dtbo）
+name: 编译 fuxi 内核 (SM8550) - 最终版
 
 on:
   push:
@@ -62,14 +62,12 @@ jobs:
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
 
-      # ========== 整合设备树文件（完整递归） ==========
+      # ========== 整合设备树文件（完整递归 + 双路径 bindings） ==========
       - name: 整合设备树文件
         run: |
-          # 确保目标目录存在
           mkdir -p kernel/arch/arm64/boot/dts/qcom/
           mkdir -p kernel/include/dt-bindings/
 
-          # 递归复制 qcom 目录下的所有内容（保留子目录和 Makefile）
           if [ -d "device-trees/qcom" ]; then
             cp -rf device-trees/qcom/* kernel/arch/arm64/boot/dts/qcom/
             echo "已递归复制设备树源文件"
@@ -78,19 +76,23 @@ jobs:
             exit 1
           fi
 
-          # 递归复制 bindings 头文件
           if [ -d "device-trees/bindings" ]; then
+            # 复制到 dt-bindings 根目录
             cp -rf device-trees/bindings/* kernel/include/dt-bindings/
-            echo "已递归复制 bindings 头文件"
+            # 同时复制到 dt-bindings/bindings 子目录，支持 #include <bindings/...>
+            mkdir -p kernel/include/dt-bindings/bindings
+            cp -rf device-trees/bindings/* kernel/include/dt-bindings/bindings/
+            echo "已复制 bindings 头文件（双路径）"
           else
             echo "警告: device-trees/bindings 目录不存在"
           fi
 
-          # 列出复制后的结构（调试）
           echo "=== 设备树目录结构（前20行）==="
           find kernel/arch/arm64/boot/dts/qcom -type f | head -20
-          echo "=== bindings 头文件（前5个）==="
-          find kernel/include/dt-bindings -name "*.h" | head -5
+          echo "=== bindings 头文件（dt-bindings 根目录，前5个）==="
+          find kernel/include/dt-bindings -maxdepth 1 -name "*.h" | head -5 || true
+          echo "=== bindings 头文件（dt-bindings/bindings 子目录，前5个）==="
+          find kernel/include/dt-bindings/bindings -name "*.h" | head -5 || true
 
       # ========== 集成 KernelSU ==========
       - name: 集成 KernelSU
@@ -119,7 +121,6 @@ jobs:
           echo "CONFIG_ARCH_QCOM=y" >> $DEFCONFIG
           echo "CONFIG_BUILD_ARM64_DT_OVERLAY=y" >> $DEFCONFIG
           echo "# CONFIG_KASAN is not set" >> $DEFCONFIG
-          # 彻底禁用 BTF
           sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
           echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
 
@@ -245,10 +246,8 @@ jobs:
       - name: 准备内核镜像
         working-directory: kernel
         run: |
-          # 查找主 dtb（假设为 kalama-mtp.dtb）
           MAIN_DTB=$(find out -name "kalama-mtp.dtb" | head -n1)
           if [ -z "$MAIN_DTB" ]; then
-            # 如果没有，使用第一个 dtb
             MAIN_DTB=$(find out -name "*.dtb" | head -n1)
             echo "警告：未找到 kalama-mtp.dtb，使用 $MAIN_DTB 作为主 dtb"
           else
