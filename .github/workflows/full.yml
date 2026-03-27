@@ -51,10 +51,10 @@ jobs:
           path: device/xiaomi/fuxi
           ref: lineage-23.2
 
-      - name: 同步内核模块（高通/NXP 驱动）
+      - name: 同步内核模块（高通全平台驱动）
         uses: actions/checkout@v4
         with:
-          repository: LineageOS/android_kernel_xiaomi_sm8550-modules
+          repository: LineageOS/android_kernel_qcom_sm8550-modules
           path: modules
           ref: lineage-23.2
 
@@ -182,29 +182,18 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 编译外部模块（audio/wlan/nxp 等）==========
+      # ========== 编译所有外部模块（audio/bt/camera/wlan/display 等）==========
       - name: 编译外部模块
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           export KERNEL_SRC=$GITHUB_WORKSPACE/kernel
           export KERNEL_OUT=$KERNEL_SRC/out
           
-          # 创建模块输出目录
           mkdir -p $GITHUB_WORKSPACE/modules_built
           
-          # 定义需要编译的模块目录列表
-          MODULES_LIST="
-            modules/qcom/opensource/audio-kernel
-            modules/qcom/opensource/wlan
-            modules/qcom/opensource/display-drivers
-            modules/qcom/opensource/sensors
-            modules/qcom/opensource/power
-            modules/nxp/opensource/driver
-          "
-          
-          # 编译每个模块
-          for MODULE_PATH in $MODULES_LIST; do
-            if [ -d "$MODULE_PATH" ]; then
+          # 编译 qcom/opensource 下的所有模块（包括 audio、bt、camera、wlan、display 等）
+          for MODULE_PATH in modules/qcom/opensource/*/; do
+            if [ -d "$MODULE_PATH" ] && [ -f "$MODULE_PATH/Kbuild" -o -f "$MODULE_PATH/Makefile" ]; then
               echo "编译模块: $MODULE_PATH"
               make -C $KERNEL_SRC \
                 O=$KERNEL_OUT \
@@ -216,14 +205,26 @@ jobs:
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                 M=$GITHUB_WORKSPACE/$MODULE_PATH \
                 modules
-            else
-              echo "警告: 模块路径不存在: $MODULE_PATH"
             fi
           done
           
+          # 编译 nxp 驱动
+          if [ -d "modules/nxp" ]; then
+            echo "编译 NXP 模块"
+            make -C $KERNEL_SRC \
+              O=$KERNEL_OUT \
+              ARCH=arm64 \
+              CC="ccache clang" \
+              LLVM=1 \
+              LLVM_IAS=1 \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              M=$GITHUB_WORKSPACE/modules/nxp/opensource/driver \
+              modules
+          fi
+          
           # 收集所有编译出的模块
-          find $KERNEL_SRC/out -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \;
-          find $KERNEL_SRC -name "*.ko" -path "*/modules/*" -not -path "*/out/*" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \; 2>/dev/null || true
+          find $KERNEL_OUT -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \;
 
       # ========== Docker 编译 USBIP 模块 ==========
       - name: 使用 Docker 编译 USBIP 模块
@@ -271,7 +272,7 @@ jobs:
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # ========== 合并所有模块 ==========
+      # ========== 合并所有模块并打包 ==========
       - name: 合并所有模块
         run: |
           mkdir -p modules_final
