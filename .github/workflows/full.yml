@@ -10,7 +10,6 @@ on:
 env:
   AOSP_TOOLCHAIN_BRANCH: android16
   AOSP_CLANG_VERSION: r547379
-  # KernelSU 版本
   KERNELSU_VERSION: main
 
 jobs:
@@ -25,13 +24,12 @@ jobs:
     steps:
       - name: 安装软件包
         env:
-          # 添加 libelf-dev 解决 resolve_btfids 编译错误，同时补充常见依赖
           PACKAGES: ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential device-tree-compiler
         run: |
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
-      # ========== 同步所有仓库 ==========
+      # ========== 同步仓库 ==========
       - name: 同步内核源码
         uses: actions/checkout@v4
         with:
@@ -53,12 +51,7 @@ jobs:
           path: device/xiaomi/fuxi
           ref: lineage-23.2
 
-      - name: 同步内核模块（闭源模块）
-        uses: actions/checkout@v4
-        with:
-          repository: LineageOS/android_kernel_xiaomi_sm8550-modules
-          path: vendor/xiaomi/sm8550-modules
-          ref: lineage-23.2
+      # 注：vendor/xiaomi/sm8550-modules 仓库暂不编译，如有需要可后续添加
 
       # ========== 工具链缓存 ==========
       - name: 缓存Clang
@@ -82,16 +75,12 @@ jobs:
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
 
-      # ========== 复制设备树文件到内核树 ==========
+      # ========== 复制设备树文件 ==========
       - name: 复制设备树文件
         run: |
-          # 确保目标目录存在
           mkdir -p kernel/arch/arm64/boot/dts/qcom/
-          # 复制 common 设备树（可能包含头文件，需保留结构）
           cp -r device/xiaomi/sm8550-common/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-          # 复制 fuxi 设备树
           cp -r device/xiaomi/fuxi/dts/* kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
-          # 如果存在 Makefile 或 Kbuild，也一并复制
           cp device/xiaomi/sm8550-common/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
           cp device/xiaomi/fuxi/dts/Makefile kernel/arch/arm64/boot/dts/qcom/ 2>/dev/null || true
 
@@ -100,76 +89,52 @@ jobs:
         working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_VERSION }}
-          # 可选：添加 susfs 扩展（如需增强隐藏功能）
-          # curl -LSs "https://raw.githubusercontent.com/simonpunk/susfs4ksu/main/setup.sh" | bash -s v1.5.5
 
-      # ========== 配置内核参数（基础 + KernelSU + USBIP）==========
-      - name: 配置内核基础参数 (Kprobes/OverlayFS/LTO等)
+      # ========== 配置内核参数 ==========
+      - name: 配置内核基础参数
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
           
-          # 开启 Kprobes
+          # 原有配置
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBE_EVENTS=y" >> $DEFCONFIG
-          
-          # 开启 OverlayFS
           echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
-          
-          # 禁用 LTO
           sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/' $DEFCONFIG
           sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/' $DEFCONFIG
           sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
-          
-          # 禁用 CC_WERROR
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-
-          # 添加 KernelSU 配置（如果脚本未自动添加）
+          
+          # KernelSU
           echo "CONFIG_KSU=y" >> $DEFCONFIG
-          # 可选：启用 SUSFS
-          # echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
-
-          # 添加 USBIP 支持（作为模块）
+          
+          # USBIP（模块）
           echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
-          # 可选：调试
-          # echo "CONFIG_USBIP_DEBUG=y" >> $DEFCONFIG
 
-      # 保留原有的 LXC/Docker 支持配置
-      - name: 配置 LXC 和 Docker 支持
+      - name: 配置 LXC/Docker 支持
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
           rm -rf utils
           git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
-
-          # 移除 LXC 补丁中强制选中的越权语句
           sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
           sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
           sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
           sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
           sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
-          
           echo 'source "utils/Kconfig"' >> "Kconfig"
           echo "CONFIG_DOCKER=y" >> $DEFCONFIG
-          
-          # 在 defconfig 显式禁用会引发代码冲突的调度器特性
           echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
           echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
-
-          # 禁用偏执网络
           sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
           echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
-          
-          # 显式禁用发生冲突的 Block 特性
           echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
           echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
-
-          # 统一在此处应用 runc 补丁和 qtaguid 补丁
           chmod +x utils/runcpatch.sh
           if [ -f kernel/cgroup/cgroup.c ]; then
               sh utils/runcpatch.sh kernel/cgroup/cgroup.c
@@ -181,32 +146,21 @@ jobs:
               patch -p0 < utils/xt_qtaguid.patch
           fi
 
-      # ===== 修复配置：关闭虚拟化，启用必要功能 =====
-      - name: 修复配置（关闭KVM/VFIO，启用MMU_NOTIFIER和Android Vendor Hooks）
+      - name: 修复配置（关闭虚拟化等）
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
-          
-          # 彻底禁用 KVM 和 VIRTUALIZATION
           sed -i '/CONFIG_KVM/d' $DEFCONFIG
           sed -i '/CONFIG_VIRTUALIZATION/d' $DEFCONFIG
           echo "# CONFIG_KVM is not set" >> $DEFCONFIG
           echo "# CONFIG_VIRTUALIZATION is not set" >> $DEFCONFIG
-          
-          # 彻底禁用 VFIO 及其相关选项
           sed -i '/CONFIG_VFIO/d' $DEFCONFIG
           sed -i '/CONFIG_VFIO_PCI/d' $DEFCONFIG
           echo "# CONFIG_VFIO is not set" >> $DEFCONFIG
           echo "# CONFIG_VFIO_PCI is not set" >> $DEFCONFIG
-          
-          # 启用 MMU_NOTIFIER
           echo "CONFIG_MMU_NOTIFIER=y" >> $DEFCONFIG
-
-          # 启用 Android Vendor Hooks 解决未定义符号
           echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
           echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
-
-          # 禁用 DEBUG_INFO_BTF，避免缺少 pahole 导致编译失败
           sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
           echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
 
@@ -228,25 +182,10 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 编译闭源模块（vendor modules）==========
-      - name: 编译 vendor 模块
-        working-directory: vendor/xiaomi/sm8550-modules
-        run: |
-          # 使用内核编译的输出头文件编译模块
-          export KERNEL_SRC=$GITHUB_WORKSPACE/kernel
-          export KERNEL_OUT=$KERNEL_SRC/out
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-          # 假设模块有自己的 Makefile，通过内核构建系统编译
-          make -C $KERNEL_SRC M=$(pwd) O=$KERNEL_OUT ARCH=arm64 \
-            CC="ccache clang" LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            modules
-
-      # ========== 使用 Docker 编译 USBIP 模块（独立编译）==========
+      # ========== 使用 Docker 编译 USBIP 模块 ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
-          # 准备 Dockerfile，包含交叉编译工具链
+          # 准备 Dockerfile（参考 full 的常见做法）
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           RUN apt update && apt install -y \
@@ -256,10 +195,8 @@ jobs:
           WORKDIR /build
           EOF
 
-          # 构建镜像
           docker build -t usbip-builder .
 
-          # 准备编译脚本（在容器内执行）
           cat > build_usbip.sh <<'EOF'
           #!/bin/bash
           set -e
@@ -267,11 +204,8 @@ jobs:
           OUTPUT_DIR="$2"
 
           cd "$KERNEL_SRC"
-          # 清理残留
           make mrproper
-          # 使用修改后的 defconfig（已包含 USBIP 模块配置）
           cp arch/arm64/configs/fuxi_GKI_defconfig .config
-          # 确保 USBIP 相关配置正确
           scripts/config --enable CONFIG_USBIP_CORE
           scripts/config --enable CONFIG_USBIP_VHCI_HCD
           scripts/config --enable CONFIG_USBIP_HOST
@@ -279,89 +213,52 @@ jobs:
           scripts/config --module CONFIG_USBIP_VHCI_HCD
           scripts/config --module CONFIG_USBIP_HOST
 
-          # 设置交叉编译环境
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # 准备模块编译环境
           make modules_prepare
-          # 仅编译 USBIP 模块
           make M=drivers/usb/usbip modules
 
-          # 复制产物
           mkdir -p "$OUTPUT_DIR"
           cp drivers/usb/usbip/*.ko "$OUTPUT_DIR"
           EOF
           chmod +x build_usbip.sh
 
-          # 运行容器，挂载内核源码和输出目录
           docker run --rm \
             -v $GITHUB_WORKSPACE/kernel:/build/kernel \
             -v $GITHUB_WORKSPACE/modules_usbip:/out \
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # ========== 准备内核镜像（生成 Image.gz-dtb）==========
+      # ========== 准备内核镜像 ==========
       - name: 准备内核镜像 (生成 Image.gz-dtb)
         working-directory: kernel
         run: |
           set -e
-          echo "检查编译输出目录："
-          ls -la out/arch/arm64/boot/
-          ls -la out/arch/arm64/boot/dts/ || echo "没有 dts 目录"
-          
-          # 首先尝试查找已存在的 dtb 文件
           DTB_FILES=$(find out -name "*.dtb" 2>/dev/null || true)
           if [ -z "$DTB_FILES" ]; then
-            echo "未找到任何 dtb 文件，尝试编译设备树..."
             make -j$(nproc) O=out ARCH=arm64 dtbs
             DTB_FILES=$(find out -name "*.dtb" 2>/dev/null || true)
           fi
-          
-          if [ -z "$DTB_FILES" ]; then
-            echo "错误：仍然找不到任何设备树文件 (.dtb)"
-            exit 1
-          fi
-          
-          echo "找到以下 dtb 文件："
-          echo "$DTB_FILES"
-          
-          # 根据设备名 fuxi 选择 dtb 文件
           FUXI_DTB=$(echo "$DTB_FILES" | grep -E "fuxi|sm8550" | head -n1)
           if [ -z "$FUXI_DTB" ]; then
-            # 如果没有匹配的，取第一个 dtb
             FUXI_DTB=$(echo "$DTB_FILES" | head -n1)
-            echo "警告：未找到包含 fuxi 或 sm8550 的 dtb 文件，使用第一个 dtb: $FUXI_DTB"
-          else
-            echo "找到匹配的设备树文件：$FUXI_DTB"
           fi
-          
-          # 如果 Image.gz-dtb 不存在，手动创建
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "生成 Image.gz-dtb..."
-            # 压缩 Image 为 Image.gz
             gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
-            # 合并
             cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
-            echo "已生成 out/arch/arm64/boot/Image.gz-dtb"
-          else
-            echo "Image.gz-dtb 已存在"
           fi
-          ls -la out/arch/arm64/boot/Image.gz-dtb
 
       # ========== 打包模块 ==========
-      - name: 收集所有内核模块
+      - name: 打包 USBIP 模块
         run: |
           mkdir -p modules_all
-          # 复制内核编译出的模块（排除 USBIP，已单独编译）
-          find kernel/out -name "*.ko" -not -path "*/drivers/usb/usbip/*" -exec cp {} modules_all/ \;
-          # 复制 vendor 模块
-          find vendor/xiaomi/sm8550-modules -name "*.ko" -exec cp {} modules_all/ \;
-          # 复制 Docker 编译的 USBIP 模块
           cp modules_usbip/*.ko modules_all/ 2>/dev/null || true
-          # 打包模块 zip
+          # 也可打包内核其他模块（如有需要）
+          find kernel/out -name "*.ko" -not -path "*/drivers/usb/usbip/*" -exec cp {} modules_all/ \; 2>/dev/null || true
           cd modules_all
           zip -qr ../modules-${{ matrix.device }}.zip *
 
+      # ========== 打包 AnyKernel3 ==========
       - name: 打包(AnyKernel3)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
@@ -394,6 +291,7 @@ jobs:
           mv Image.gz-dtb out/kernel
           eval "./mkbootimg.py $mkbootimg_args -o ${{ matrix.device }}-${{ env.AOSP_TOOLCHAIN_BRANCH }}-boot-lineage.img"
 
+      # ========== 上传产物 ==========
       - name: 上传 AnyKernel3 包
         uses: actions/upload-artifact@v5
         with:
