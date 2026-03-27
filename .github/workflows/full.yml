@@ -1,50 +1,39 @@
 name: Build Kernel for Xiaomi fuxi (SM8550)
 
 on:
-  # 手动触发（推荐）
   workflow_dispatch:
-  # 可选：推送到特定分支时自动构建
   # push:
-  #   branches:
-  #     - main
-  #     - lineage-23.2
+  #   branches: [ main, lineage-23.2 ]
 
 env:
-  # 内核源码目录
   KERNEL_DIR: kernel/xiaomi/sm8550
-  # 设备树目录
   DEVICE_COMMON_DIR: device/xiaomi/sm8550-common
   DEVICE_FUXI_DIR: device/xiaomi/fuxi
-  # 内核模块目录（闭源模块）
   MODULES_DIR: vendor/xiaomi/sm8550-modules
-  # 输出目录
   OUT_DIR: out/kernel
   RELEASE_DIR: releases
-  # 交叉编译工具链（使用 AOSP 预置 Clang）
-  CROSS_COMPILE: aarch64-linux-android-
   ARCH: arm64
-  # KernelSU 版本（可指定 commit）
   KERNELSU_VERSION: main
+  # NDK 版本
+  NDK_VERSION: r26c
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 安装依赖（系统工具 + Docker）
-      - name: Install dependencies
+      # 1. 安装系统依赖（不安装 docker.io）
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             bc bison build-essential ccache \
             flex libssl-dev libelf-dev \
             git git-lfs wget curl cpio \
-            python3 python3-pip
+            python3 python3-pip \
+            lz4 lzop xz-utils device-tree-compiler
           pip3 install PyYAML
-          # 安装 Docker（GitHub 默认包含，但确保最新）
-          sudo apt install -y docker.io
-          sudo systemctl start docker
 
-      # 2. 设置 ccache
+      # 2. 设置 ccache 加速
       - name: Setup ccache
         run: |
           echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
@@ -59,51 +48,48 @@ jobs:
           path: ${{ env.KERNEL_DIR }}
           fetch-depth: 1
 
-      # 4. 检出设备树仓库（common 和 fuxi）
+      # 4. 检出设备树仓库
       - name: Checkout device trees
         run: |
           git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_device_xiaomi_sm8550-common ${{ env.DEVICE_COMMON_DIR }}
           git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_device_xiaomi_fuxi ${{ env.DEVICE_FUXI_DIR }}
 
-      # 5. 检出内核模块仓库（闭源模块）
+      # 5. 检出内核模块仓库
       - name: Checkout kernel modules
         run: |
           git clone --depth 1 -b lineage-23.2 https://github.com/LineageOS/android_kernel_xiaomi_sm8550-modules ${{ env.MODULES_DIR }}
 
-      # 6. 下载交叉编译工具链（使用 Android NDK r26 的 Clang）
-      - name: Setup toolchain
+      # 6. 下载并设置 Android NDK 工具链
+      - name: Setup NDK toolchain
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r26c-linux.zip
-          unzip -q android-ndk-r26c-linux.zip -d /tmp/
-          echo "PATH=/tmp/android-ndk-r26c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
+          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
+          unzip -q android-ndk-${NDK_VERSION}-linux.zip -d /tmp/
+          echo "PATH=/tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
 
       # 7. 集成 KernelSU
       - name: Integrate KernelSU
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          # 使用官方脚本添加 KernelSU
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s ${{ env.KERNELSU_VERSION }}
-          # 可选：添加 susfs 扩展（如需增强隐藏功能）
+          # 可选：添加 susfs 扩展
           # curl -LSs "https://raw.githubusercontent.com/simonpunk/susfs4ksu/main/setup.sh" | bash -s v1.5.5
 
-      # 8. 修改 defconfig 启用 KernelSU 和 USBIP
-      - name: Modify defconfig
+      # 8. 修改 defconfig（启用 KernelSU 和 USBIP）
+      - name: Configure defconfig
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           # 备份原配置
           cp arch/arm64/configs/fuxi_GKI_defconfig arch/arm64/configs/fuxi_GKI_defconfig.bak
-          # 启用 KernelSU（如果脚本未自动添加）
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/fuxi_GKI_defconfig
-          # 可选：启用 SUSFS 扩展
-          # echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/fuxi_GKI_defconfig
-          # 启用 USBIP（作为模块）
-          echo "CONFIG_USBIP_CORE=m" >> arch/arm64/configs/fuxi_GKI_defconfig
-          echo "CONFIG_USBIP_VHCI_HCD=m" >> arch/arm64/configs/fuxi_GKI_defconfig
-          echo "CONFIG_USBIP_HOST=m" >> arch/arm64/configs/fuxi_GKI_defconfig
-          # 可选：调试
-          echo "CONFIG_USBIP_DEBUG=y" >> arch/arm64/configs/fuxi_GKI_defconfig
+          # 追加配置
+          cat >> arch/arm64/configs/fuxi_GKI_defconfig <<EOF
+          CONFIG_KSU=y
+          CONFIG_USBIP_CORE=m
+          CONFIG_USBIP_VHCI_HCD=m
+          CONFIG_USBIP_HOST=m
+          # CONFIG_USBIP_DEBUG=y
+          EOF
 
-      # 9. 编译内核（主内核和普通模块）
+      # 9. 编译主内核和模块（不包含 USBIP）
       - name: Build kernel and modules
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
@@ -111,92 +97,87 @@ jobs:
           export CC=clang
           export LD=ld.lld
           export AR=llvm-ar
+          export AS=llvm-as
           export NM=llvm-nm
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export READELF=llvm-readelf
-          export CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+          export CROSS_COMPILE=aarch64-linux-android-
           export ARCH=${{ env.ARCH }}
-          
-          # 生成配置
-          make ${{ env.ARCH }} fuxi_GKI_defconfig
-          # 可选：合并设备树中的额外配置片段
-          # cat ../../${{ env.DEVICE_FUXI_DIR }}/extra_defconfig >> .config
-          
-          # 使用 ccache
           export CCACHE_DIR=${{ github.workspace }}/.ccache
           export CCACHE_MAXSIZE=2G
           export CC="ccache clang"
-          
+
+          make ${{ env.ARCH }} fuxi_GKI_defconfig
+          # 可选：合并设备树中的额外配置
+          # cat ../../${{ env.DEVICE_FUXI_DIR }}/extra_defconfig >> .config
+
           # 编译内核镜像
           make -j$(nproc) Image.gz dtbo.img
-          
-          # 编译所有模块（不含 USBIP，后面单独处理）
+
+          # 编译所有模块（排除 USBIP，后面单独处理）
           make -j$(nproc) modules
-          
+
           # 创建输出目录
-          mkdir -p ../../${{ env.OUT_DIR }}
           mkdir -p ../../${{ env.OUT_DIR }}/modules
-          
+
           # 复制内核镜像
           cp arch/arm64/boot/Image.gz ../../${{ env.OUT_DIR }}/
           cp arch/arm64/boot/dtbo.img ../../${{ env.OUT_DIR }}/
-          
+
           # 复制普通模块（排除 USBIP）
           find . -name "*.ko" -not -path "./drivers/usb/usbip/*" -exec cp {} ../../${{ env.OUT_DIR }}/modules/ \;
 
-      # 10. 使用 Docker 编译 USBIP 模块（独立编译）
+      # 10. 使用 Docker 编译 USBIP 模块（参考 full 方式）
       - name: Build USBIP modules with Docker
         run: |
-          # 准备 Dockerfile
-          cat > Dockerfile <<EOF
+          # 准备 Dockerfile，包含交叉编译工具链
+          cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           RUN apt update && apt install -y \
               build-essential bc bison flex libssl-dev libelf-dev \
-              git cpio kmod wget xz-utils
+              git cpio kmod wget xz-utils \
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           WORKDIR /build
           EOF
-          
+
           # 构建镜像
           docker build -t usbip-builder .
-          
-          # 创建脚本（用于容器内执行）
+
+          # 准备编译脚本（在容器内执行）
           cat > build_usbip.sh <<'EOF'
           #!/bin/bash
           set -e
           KERNEL_SRC="$1"
           OUTPUT_DIR="$2"
-          
+
           cd "$KERNEL_SRC"
-          # 清理（保留配置）
+          # 清理残留
           make mrproper
-          # 恢复配置
+          # 使用修改后的 defconfig（已包含 USBIP 模块配置）
           cp arch/arm64/configs/fuxi_GKI_defconfig .config
-          # 开启 USBIP 模块（确保是模块）
+          # 确保 USBIP 相关配置正确（以防 defconfig 未完全包含）
           scripts/config --enable CONFIG_USBIP_CORE
           scripts/config --enable CONFIG_USBIP_VHCI_HCD
           scripts/config --enable CONFIG_USBIP_HOST
           scripts/config --module CONFIG_USBIP_CORE
           scripts/config --module CONFIG_USBIP_VHCI_HCD
           scripts/config --module CONFIG_USBIP_HOST
-          
-          # 准备编译环境
+
+          # 设置交叉编译环境
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # 注意：容器内需要交叉编译工具链，我们直接使用宿主机的？这里简化，假设容器内已安装工具链，或者我们挂载宿主机工具链。
-          # 实际可以挂载宿主机 NDK 到容器，此处为了演示，我们假设容器内已经安装好 aarch64-linux-gnu-gcc（但 ubuntu 默认无，需安装）
-          # 更稳妥的方法：在 Dockerfile 中安装交叉编译工具链，或者挂载宿主机的 NDK。
-          # 这里我们改为在容器内安装 gcc-aarch64-linux-gnu
-          apt update && apt install -y gcc-aarch64-linux-gnu
-          
+          # 准备模块编译环境
           make modules_prepare
+          # 仅编译 USBIP 模块
           make M=drivers/usb/usbip modules
-          
+
+          # 复制产物
           mkdir -p "$OUTPUT_DIR"
           cp drivers/usb/usbip/*.ko "$OUTPUT_DIR"
           EOF
           chmod +x build_usbip.sh
-          
+
           # 运行容器，挂载内核源码和输出目录
           docker run --rm \
             -v ${{ github.workspace }}/${{ env.KERNEL_DIR }}:/build/kernel \
@@ -204,33 +185,24 @@ jobs:
             -v ${{ github.workspace }}/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # 11. 将 USBIP 模块合并到最终产物中
+      # 11. 合并 USBIP 模块到主模块目录
       - name: Merge USBIP modules
         run: |
-          cp ${{ env.OUT_DIR }}/usbip/*.ko ${{ env.OUT_DIR }}/modules/
+          cp ${{ env.OUT_DIR }}/usbip/*.ko ${{ env.OUT_DIR }}/modules/ || true
 
       # 12. 打包最终产物
       - name: Package artifacts
         run: |
           mkdir -p ${{ env.RELEASE_DIR }}
-          # 创建压缩包
           tar -czf ${{ env.RELEASE_DIR }}/kernel-fuxi-$(date +%Y%m%d-%H%M%S).tar.gz -C ${{ env.OUT_DIR }} .
-          # 生成简短信息文件
           echo "Build date: $(date)" > ${{ env.RELEASE_DIR }}/build_info.txt
           echo "KernelSU version: ${{ env.KERNELSU_VERSION }}" >> ${{ env.RELEASE_DIR }}/build_info.txt
           echo "Kernel commit: $(cd ${{ env.KERNEL_DIR }} && git rev-parse --short HEAD)" >> ${{ env.RELEASE_DIR }}/build_info.txt
 
-      # 13. 上传构建产物（作为 GitHub Actions Artifact）
+      # 13. 上传工件
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-fuxi
           path: ${{ env.RELEASE_DIR }}/
           retention-days: 7
-
-      # 可选：自动发布到 Releases
-      # - name: Create Release
-      #   uses: softprops/action-gh-release@v1
-      #   if: startsWith(github.ref, 'refs/tags/')
-      #   with:
-      #     files: ${{ env.RELEASE_DIR }}/*.tar.gz
