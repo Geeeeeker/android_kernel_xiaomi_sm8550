@@ -182,12 +182,9 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 使用 Docker 编译 USBIP 模块（使用独立副本） ==========
+      # ========== 使用 Docker 编译 USBIP 模块（直接使用主 out 目录） ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
-          # 创建内核源码的临时副本，避免污染主源码树
-          cp -r kernel kernel_usbip_temp
-          
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           RUN apt update && apt install -y \
@@ -203,36 +200,25 @@ jobs:
           #!/bin/bash
           set -e
           KERNEL_SRC="$1"
-          OUTPUT_DIR="$2"
+          KERNEL_OUT="$2"
+          OUTPUT_DIR="$3"
 
           cd "$KERNEL_SRC"
-          make mrproper
-          cp arch/arm64/configs/fuxi_GKI_defconfig .config
-          scripts/config --enable CONFIG_USBIP_CORE
-          scripts/config --enable CONFIG_USBIP_VHCI_HCD
-          scripts/config --enable CONFIG_USBIP_HOST
-          scripts/config --module CONFIG_USBIP_CORE
-          scripts/config --module CONFIG_USBIP_VHCI_HCD
-          scripts/config --module CONFIG_USBIP_HOST
-
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make modules_prepare
-          make M=drivers/usb/usbip modules
+          # 使用已有的 out 目录，不执行 mrproper
+          make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare
+          make O="$KERNEL_OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- M=drivers/usb/usbip modules
 
           mkdir -p "$OUTPUT_DIR"
-          cp drivers/usb/usbip/*.ko "$OUTPUT_DIR"
+          cp "$KERNEL_OUT"/drivers/usb/usbip/*.ko "$OUTPUT_DIR"
           EOF
           chmod +x build_usbip.sh
 
           docker run --rm \
-            -v $GITHUB_WORKSPACE/kernel_usbip_temp:/build/kernel \
+            -v $GITHUB_WORKSPACE/kernel:/build/kernel \
+            -v $GITHUB_WORKSPACE/kernel/out:/build/kernel_out \
             -v $GITHUB_WORKSPACE/modules_usbip:/out \
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
-            usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
-
-          # 清理临时副本
-          rm -rf kernel_usbip_temp
+            usbip-builder /bin/bash /build_usbip.sh /build/kernel /build/kernel_out /out
 
       # ========== 打包 USBIP 模块 ==========
       - name: 打包 USBIP 模块
