@@ -29,7 +29,7 @@ jobs:
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
-      # ========== 同步四个仓库（模块仓库仅保留，不编译） ==========
+      # ========== 同步四个仓库 ==========
       - name: 同步内核源码
         uses: actions/checkout@v4
         with:
@@ -182,9 +182,12 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 使用 Docker 编译 USBIP 模块 ==========
+      # ========== 使用 Docker 编译 USBIP 模块（使用独立副本） ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
+          # 创建内核源码的临时副本，避免污染主源码树
+          cp -r kernel kernel_usbip_temp
+          
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           RUN apt update && apt install -y \
@@ -223,12 +226,15 @@ jobs:
           chmod +x build_usbip.sh
 
           docker run --rm \
-            -v $GITHUB_WORKSPACE/kernel:/build/kernel \
+            -v $GITHUB_WORKSPACE/kernel_usbip_temp:/build/kernel \
             -v $GITHUB_WORKSPACE/modules_usbip:/out \
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
-      # ========== 合并 USBIP 模块 ==========
+          # 清理临时副本
+          rm -rf kernel_usbip_temp
+
+      # ========== 打包 USBIP 模块 ==========
       - name: 打包 USBIP 模块
         run: |
           mkdir -p modules_final
