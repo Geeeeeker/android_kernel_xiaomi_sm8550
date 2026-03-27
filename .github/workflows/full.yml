@@ -1,4 +1,4 @@
-name: 编译 fuxi 内核 (SM8550)
+name: 编译 fuxi 内核 (SM8550) - 完整版
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
           sudo apt update > /dev/null
           sudo apt install -y ${{ env.PACKAGES }} > /dev/null
 
-      # ========== 同步仓库 ==========
+      # ========== 同步四个仓库 ==========
       - name: 同步内核源码
         uses: actions/checkout@v4
         with:
@@ -51,7 +51,12 @@ jobs:
           path: device/xiaomi/fuxi
           ref: lineage-23.2
 
-      # 注：vendor/xiaomi/sm8550-modules 仓库暂不编译，如有需要可后续添加
+      - name: 同步内核模块（高通/NXP 驱动）
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_xiaomi_sm8550-modules
+          path: modules
+          ref: lineage-23.2
 
       # ========== 工具链缓存 ==========
       - name: 缓存Clang
@@ -75,7 +80,7 @@ jobs:
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
 
-      # ========== 复制设备树文件 ==========
+      # ========== 复制设备树 ==========
       - name: 复制设备树文件
         run: |
           mkdir -p kernel/arch/arm64/boot/dts/qcom/
@@ -96,7 +101,6 @@ jobs:
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
           
-          # 原有配置
           echo "CONFIG_MODULES=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
           echo "CONFIG_HAVE_KPROBES=y" >> $DEFCONFIG
@@ -107,11 +111,7 @@ jobs:
           sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/' $DEFCONFIG
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_CC_WERROR=n" >> $DEFCONFIG
-          
-          # KernelSU
           echo "CONFIG_KSU=y" >> $DEFCONFIG
-          
-          # USBIP（模块）
           echo "CONFIG_USBIP_CORE=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_VHCI_HCD=m" >> $DEFCONFIG
           echo "CONFIG_USBIP_HOST=m" >> $DEFCONFIG
@@ -146,7 +146,7 @@ jobs:
               patch -p0 < utils/xt_qtaguid.patch
           fi
 
-      - name: 修复配置（关闭虚拟化等）
+      - name: 修复配置
         working-directory: kernel
         run: |
           DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
@@ -182,10 +182,52 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             fuxi_GKI_defconfig all
 
-      # ========== 使用 Docker 编译 USBIP 模块 ==========
+      # ========== 编译外部模块（audio/wlan/nxp 等）==========
+      - name: 编译外部模块
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          export KERNEL_SRC=$GITHUB_WORKSPACE/kernel
+          export KERNEL_OUT=$KERNEL_SRC/out
+          
+          # 创建模块输出目录
+          mkdir -p $GITHUB_WORKSPACE/modules_built
+          
+          # 定义需要编译的模块目录列表
+          MODULES_LIST="
+            modules/qcom/opensource/audio-kernel
+            modules/qcom/opensource/wlan
+            modules/qcom/opensource/display-drivers
+            modules/qcom/opensource/sensors
+            modules/qcom/opensource/power
+            modules/nxp/opensource/driver
+          "
+          
+          # 编译每个模块
+          for MODULE_PATH in $MODULES_LIST; do
+            if [ -d "$MODULE_PATH" ]; then
+              echo "编译模块: $MODULE_PATH"
+              make -C $KERNEL_SRC \
+                O=$KERNEL_OUT \
+                ARCH=arm64 \
+                CC="ccache clang" \
+                LLVM=1 \
+                LLVM_IAS=1 \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                M=$GITHUB_WORKSPACE/$MODULE_PATH \
+                modules
+            else
+              echo "警告: 模块路径不存在: $MODULE_PATH"
+            fi
+          done
+          
+          # 收集所有编译出的模块
+          find $KERNEL_SRC/out -name "*.ko" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \;
+          find $KERNEL_SRC -name "*.ko" -path "*/modules/*" -not -path "*/out/*" -exec cp {} $GITHUB_WORKSPACE/modules_built/ \; 2>/dev/null || true
+
+      # ========== Docker 编译 USBIP 模块 ==========
       - name: 使用 Docker 编译 USBIP 模块
         run: |
-          # 准备 Dockerfile（参考 full 的常见做法）
           cat > Dockerfile <<'EOF'
           FROM ubuntu:22.04
           RUN apt update && apt install -y \
@@ -229,8 +271,17 @@ jobs:
             -v $GITHUB_WORKSPACE/build_usbip.sh:/build_usbip.sh \
             usbip-builder /bin/bash /build_usbip.sh /build/kernel /out
 
+      # ========== 合并所有模块 ==========
+      - name: 合并所有模块
+        run: |
+          mkdir -p modules_final
+          cp modules_built/*.ko modules_final/ 2>/dev/null || true
+          cp modules_usbip/*.ko modules_final/ 2>/dev/null || true
+          cd modules_final
+          zip -qr ../modules-${{ matrix.device }}.zip *
+
       # ========== 准备内核镜像 ==========
-      - name: 准备内核镜像 (生成 Image.gz-dtb)
+      - name: 准备内核镜像
         working-directory: kernel
         run: |
           set -e
@@ -247,16 +298,6 @@ jobs:
             gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
             cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
           fi
-
-      # ========== 打包模块 ==========
-      - name: 打包 USBIP 模块
-        run: |
-          mkdir -p modules_all
-          cp modules_usbip/*.ko modules_all/ 2>/dev/null || true
-          # 也可打包内核其他模块（如有需要）
-          find kernel/out -name "*.ko" -not -path "*/drivers/usb/usbip/*" -exec cp {} modules_all/ \; 2>/dev/null || true
-          cd modules_all
-          zip -qr ../modules-${{ matrix.device }}.zip *
 
       # ========== 打包 AnyKernel3 ==========
       - name: 打包(AnyKernel3)
@@ -329,7 +370,7 @@ jobs:
           echo "time=$(TZ='Asia/Shanghai' date -u +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
           echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: 下载ci管理器
+      - name: 下载 KernelSU 管理器
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v11
         with:
@@ -339,7 +380,7 @@ jobs:
           workflow: build-manager.yml
           path: manager
 
-      - name: 发布
+      - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rel-${{ steps.time.outputs.timestamp }}
