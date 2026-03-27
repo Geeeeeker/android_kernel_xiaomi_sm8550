@@ -1,4 +1,4 @@
-name: 编译 fuxi 内核 (SM8550) - 最终版
+name: 编译 fuxi 内核 (SM8550) - 含设备树仓库
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           sudo apt update
           sudo apt install -y ccache binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi libelf-dev libssl-dev flex bison build-essential device-tree-compiler
 
-      # ========== 同步四个仓库（设备树仓库仅用于可能的配置，不复制 dts） ==========
+      # ========== 同步五个仓库（增加设备树仓库） ==========
       - name: 同步内核源码
         uses: actions/checkout@v4
         with:
@@ -42,7 +42,7 @@ jobs:
           path: device/xiaomi/sm8550-common
           ref: lineage-23.2
 
-      - name: 同步设备树 fuxi
+      - name: 同步设备树 fuxi（设备配置）
         uses: actions/checkout@v4
         with:
           repository: LineageOS/android_device_xiaomi_fuxi
@@ -55,6 +55,34 @@ jobs:
           repository: LineageOS/android_kernel_xiaomi_sm8550-modules
           path: modules
           ref: lineage-23.2
+
+      - name: 同步设备树源文件（关键！）
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_xiaomi_sm8550-devicetrees
+          path: device-trees
+          ref: lineage-23.2
+
+      # ========== 复制设备树到内核树 ==========
+      - name: 复制设备树文件
+        run: |
+          # 确保目标目录存在
+          mkdir -p kernel/arch/arm64/boot/dts/qcom/
+          # 复制 devicetrees 仓库中的 qcom 目录下的所有内容到内核 dts 目录
+          if [ -d "device-trees/qcom" ]; then
+            cp -rf device-trees/qcom/* kernel/arch/arm64/boot/dts/qcom/
+            echo "已复制设备树源文件"
+          else
+            echo "错误：device-trees/qcom 目录不存在"
+            exit 1
+          fi
+          # 列出复制后的 .dts 文件
+          echo "=== 复制后的设备树源文件 ==="
+          find kernel/arch/arm64/boot/dts/qcom -name "*.dts*" | tee dts_sources.txt
+          if [ ! -s dts_sources.txt ]; then
+            echo "错误：未找到任何 .dts 文件"
+            exit 1
+          fi
 
       # ========== 工具链缓存 ==========
       - name: 缓存Clang
@@ -77,23 +105,6 @@ jobs:
           key: kernel-${{ matrix.device }}
           restore-keys: kernel-${{ matrix.device }}
           max-size: 5G
-
-      # ========== 确保内核源码中的设备树被编译 ==========
-      - name: 列出内核源码中的设备树源文件
-        working-directory: kernel
-        run: |
-          echo "=== 内核源码树中的设备树源文件 ==="
-          find arch/arm64/boot/dts/qcom -name "*.dts*" | tee dts_sources.txt
-          if [ ! -s dts_sources.txt ]; then
-            echo "警告：未找到任何设备树源文件，请检查内核源码树"
-          else
-            # 检查是否包含 fuxi
-            if grep -i fuxi dts_sources.txt; then
-              echo "找到 fuxi 设备树源文件"
-            else
-              echo "警告：未找到包含 'fuxi' 的设备树源文件"
-            fi
-          fi
 
       # ========== 集成 KernelSU ==========
       - name: 集成 KernelSU
@@ -129,6 +140,54 @@ jobs:
           # 禁用 KASAN（解决 USBIP 编译错误）
           echo "# CONFIG_KASAN is not set" >> $DEFCONFIG
 
+      - name: 配置 LXC/Docker 支持
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          rm -rf utils
+          git clone https://github.com/tomxi1997/lxc-docker-support-for-android.git utils
+          sed -i '/select CFS_BANDWIDTH/d' utils/Kconfig
+          sed -i '/select DOCKER_STATISTICS/d' utils/Kconfig
+          sed -i '/select BLK_DEV_THROTTLING/d' utils/Kconfig
+          sed -i '/select CFQ_GROUP_IOSCHED/d' utils/Kconfig
+          sed -i '/select BRIDGE_VLAN_FILTERING/d' utils/Kconfig
+          echo 'source "utils/Kconfig"' >> "Kconfig"
+          echo "CONFIG_DOCKER=y" >> $DEFCONFIG
+          echo "# CONFIG_CFS_BANDWIDTH is not set" >> $DEFCONFIG
+          echo "# CONFIG_DOCKER_STATISTICS is not set" >> $DEFCONFIG
+          sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' $DEFCONFIG
+          echo "# CONFIG_ANDROID_PARANOID_NETWORK is not set" >> $DEFCONFIG
+          echo "# CONFIG_BLK_DEV_THROTTLING is not set" >> $DEFCONFIG
+          echo "# CONFIG_CFQ_GROUP_IOSCHED is not set" >> $DEFCONFIG
+          chmod +x utils/runcpatch.sh
+          if [ -f kernel/cgroup/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup/cgroup.c
+          fi
+          if [ -f kernel/cgroup.c ]; then
+              sh utils/runcpatch.sh kernel/cgroup.c
+          fi
+          if [ -f net/netfilter/xt_qtaguid.c ]; then
+              patch -p0 < utils/xt_qtaguid.patch
+          fi
+
+      - name: 修复配置（关闭虚拟化等）
+        working-directory: kernel
+        run: |
+          DEFCONFIG="arch/arm64/configs/fuxi_GKI_defconfig"
+          sed -i '/CONFIG_KVM/d' $DEFCONFIG
+          sed -i '/CONFIG_VIRTUALIZATION/d' $DEFCONFIG
+          echo "# CONFIG_KVM is not set" >> $DEFCONFIG
+          echo "# CONFIG_VIRTUALIZATION is not set" >> $DEFCONFIG
+          sed -i '/CONFIG_VFIO/d' $DEFCONFIG
+          sed -i '/CONFIG_VFIO_PCI/d' $DEFCONFIG
+          echo "# CONFIG_VFIO is not set" >> $DEFCONFIG
+          echo "# CONFIG_VFIO_PCI is not set" >> $DEFCONFIG
+          echo "CONFIG_MMU_NOTIFIER=y" >> $DEFCONFIG
+          echo "CONFIG_ANDROID_VENDOR_HOOKS=y" >> $DEFCONFIG
+          echo "CONFIG_TRACEPOINTS=y" >> $DEFCONFIG
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $DEFCONFIG
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> $DEFCONFIG
+
       # ========== 编译内核 ==========
       - name: 编译内核
         working-directory: kernel
@@ -151,17 +210,22 @@ jobs:
         working-directory: kernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-          # 确保所有 .dts 文件都被添加到 dtb-y
+          # 确保 Makefile 包含所有 .dts
           cd arch/arm64/boot/dts/qcom
           if [ -f Makefile ]; then
-            # 备份原 Makefile
             cp Makefile Makefile.bak
-            # 添加所有 .dts 文件到 dtb-y
             for dts in $(find . -name "*.dts" -not -path "./Makefile" -printf "%P\n"); do
               dtb=${dts%.dts}.dtb
               if ! grep -q "$dtb" Makefile; then
                 echo "dtb-y += $dtb" >> Makefile
               fi
+            done
+          else
+            # 如果不存在 Makefile，创建一个
+            echo "# SPDX-License-Identifier: GPL-2.0" > Makefile
+            for dts in $(find . -name "*.dts" -not -path "./Makefile" -printf "%P\n"); do
+              dtb=${dts%.dts}.dtb
+              echo "dtb-y += $dtb" >> Makefile
             done
           fi
           cd -
@@ -237,7 +301,7 @@ jobs:
           gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
           cat out/arch/arm64/boot/Image.gz "$FUXI_DTB" > out/arch/arm64/boot/Image.gz-dtb
 
-      # ========== 打包 ==========
+      # ========== 打包 AnyKernel3 ==========
       - name: 打包 AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 ak3
